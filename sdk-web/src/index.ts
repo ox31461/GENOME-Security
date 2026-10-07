@@ -1,0 +1,10 @@
+export { GenomeClient } from "./client";
+export type { GenomeClientOptions, TrustUpdate, Decision, TrustUpdateListener, ErrorListener } from "./client";
+export { createDpopKeyPair, signDpopProof } from "./dpop";
+export type { DpopKeyPair, DpopProofOptions } from "./dpop";
+export { createCredential, getCredential, supportsDeviceBoundAuthenticator } from "./webauthn";
+export { KeystrokeCapture } from "./telemetry/keystroke";
+export type { KeystrokeCaptureOptions } from "./telemetry/keystroke";
+export { MouseCapture } from "./telemetry/mouse";
+export type { MouseCaptureOptions } from "./telemetry/mouse";
+export { generateSyntheticKeystrokeBatch } from "./telemetry/simulate";
