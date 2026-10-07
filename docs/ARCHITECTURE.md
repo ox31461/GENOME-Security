@@ -42,22 +42,29 @@ what's reused vs. what's novel.
 │  - Defends against synthetic input injection attacks             │
 └─────────────────────────────────────────────────────────────────┘
 ┌─────────────────────────────────────────────────────────────────┐
-│ Layer 2: Identity & Session Binding (STANDARDS — Phase 2 scope)  │
+│ Layer 2: Identity & Session Binding (STANDARDS — Phase 2: DONE*) │
 │  - FIDO2/WebAuthn device-bound passkeys (phishing-resistant,     │
 │    hardware-backed, the only source of "high-assurance anchor    │
 │    events" for Layer 4)                                          │
 │  - DPoP (RFC 9449) token binding (stolen tokens are unusable      │
 │    without the bound private key)                                │
 │  - Post-quantum signatures/KEM for the long-term credential       │
-│    material (ML-DSA / ML-KEM), defense against "harvest now,     │
-│    decrypt later"                                                 │
+│    material (ML-DSA / ML-KEM) — NOT implemented in Phase 2,      │
+│    deferred; see "Phase 2 divergences" below                     │
 └─────────────────────────────────────────────────────────────────┘
 ┌─────────────────────────────────────────────────────────────────┐
-│ Layer 1: Telemetry Capture (Phase 2 scope — client SDK)          │
-│  - Keystroke dynamics (dwell/flight time), mouse dynamics         │
-│  - Local-only raw capture; only derived features leave the device│
+│ Layer 1: Telemetry Capture (Phase 2: DONE, web client only)      │
+│  - Keystroke dynamics (inter-keydown interval timing), mouse     │
+│    dynamics (inter-mousemove interval timing)                    │
+│  - Local-only raw capture; only derived interval timings leave   │
+│    the device — never key values or cursor positions             │
 └─────────────────────────────────────────────────────────────────┘
 ```
+
+\* "DONE" means implemented and running end-to-end for the web client
+(`sdk-web/` + `server/` + `demo-app/`); see "Phase 2 divergences" below
+for what was deliberately deferred or simplified relative to the
+original sketch above.
 
 ## Phase 1 data flow (what actually exists in this repo today)
 
@@ -94,6 +101,77 @@ Phase 2 (see `PHASE_PLAN.md`).
                                      measured: attacker acceptance %,
                                      legitimate-user acceptance %
 ```
+
+## Phase 2 data flow (what actually exists in this repo today)
+
+Phase 2 ships Layers 1, 2, and the CARTA-style decision tier of Layer 5
+as running production code — a Rust server (`server/`), a TypeScript
+browser SDK (`sdk-web/`), and a wired-up demo (`demo-app/`) — built
+directly on top of the Phase 1 Python research prototypes (ported, not
+reimplemented blind: `server/src/alg.rs` and `server/src/detector.rs`
+carry over the same quarantine/anchor thresholds and timing-moment /
+spectral features validated in Phase 1).
+
+```
+ Browser (sdk-web/ + demo-app/)                 Server (server/, axum)
+┌──────────────────────────────┐               ┌───────────────────────────────┐
+│ navigator.credentials         │  WebAuthn     │ webauthn-rs: registration /    │
+│ .create()/.get()              │ ──ceremony──► │ assertion verification         │
+│ (passkey reg / login)         │               │  -> successful assertion =     │
+│                                │               │     high-assurance anchor      │
+│ WebCrypto ES256 keypair       │               │     event (Layer 4 trigger)    │
+│ -> DPoP proof per request      │  DPoP header  │                                 │
+│    (htm/htu/iat/jti/jkt/ath)  │ ──on login &─► │ dpop.rs: proof verify, replay   │
+│                                │   telemetry   │ window, cnf.jkt session bind    │
+│ KeystrokeCapture/MouseCapture │               │                                 │
+│ -> interval-timing batches     │  POST         │ detector.rs: synthetic vs.      │
+│    (timing only, never key    │ /api/telemetry│ genuine timing classification   │
+│    values or positions)       │ ─────────────►│         │                        │
+│                                │               │         ▼                       │
+│ Live trust dial + decision    │  JSON          │ alg.rs: quarantine buffer /     │
+│ badge updated per response    │ ◄─────────────│ anchor-gated baseline merge     │
+└──────────────────────────────┘  trust_score,  │         │                        │
+                                   decision,     │         ▼                       │
+                                   synthetic_p,  │ CARTA-style decision:           │
+                                   gate_outcome  │ allow / stepup / deny           │
+                                                 └───────────────────────────────┘
+```
+
+### Phase 2 divergences from the original sketch
+
+- **Post-quantum credential material (ML-DSA/ML-KEM) was not
+  implemented.** `webauthn-rs` negotiates classical COSE algorithms
+  (ECDSA/RSA), and DPoP proofs use classical ES256. This is an honest
+  gap, not an oversight — PQC migration for WebAuthn/DPoP is still
+  maturing industry-wide and was out of scope for a Phase 2 that
+  otherwise reuses existing crates rather than hand-rolling crypto.
+- **Device-bound / non-syncable credential enforcement is deferred.**
+  The server uses `webauthn-rs`'s standard (non-attested) passkey
+  registration flow rather than its `attested_passkey` flow, which
+  would require curating a trusted manufacturer root-CA
+  (`attestation_ca_list`) and would reject common synced/Hybrid
+  passkeys (iCloud Keychain, Google Password Manager) most real users
+  already have. This is an explicit, documented trade-off (see the
+  module doc comment in `server/src/auth.rs`) against the stricter
+  "device-bound, non-syncable" framing in the original threat model;
+  full enforcement is noted there as follow-on hardening work, not a
+  Phase 2 claim.
+- **Store is in-memory + SQLite**, explicitly documented in
+  `server/src/store.rs` and `server/README.md`-equivalent comments as
+  not suitable for a real multi-instance deployment (no replication,
+  no backup, no durability guarantees beyond a single SQLite file).
+- **Layer 1 (telemetry capture) is web-only.** No native desktop
+  client or OS input-path anomaly signal integration
+  (`attested_input_pipeline.md`'s Raw Input/evdev/Input-Monitoring
+  recommendations) was built — the SDK is intentionally scoped to
+  `sdk-web/` per the user's Phase 2 request.
+- **Layer 5's CARTA policy is a single-endpoint decision, not a
+  full policy engine.** `/api/telemetry` returns one of
+  `allow`/`stepup`/`deny` per batch; there is no session-lifecycle
+  state machine yet for e.g. automatically re-triggering WebAuthn on
+  `stepup` or revoking sessions after repeated `deny`s — that
+  orchestration currently lives in the demo app's UI layer only, as a
+  visual demonstration, not enforced server-side session control.
 
 ## Why these two layers, specifically
 

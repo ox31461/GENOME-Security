@@ -25,62 +25,93 @@ DPoP integration code. Phase 1 is a research/prototype phase focused
 entirely on validating the two novel defenses in isolation, with
 reproducible simulations rather than production deployment.
 
-## Phase 2 (future work, not yet started)
+## Phase 2 (this repo, current status: complete)
 
 Scope: build the production system around the two novel defenses
 proven out in Phase 1, by integrating the mature standards identified
 in the research survey rather than reinventing them.
 
-Planned deliverables:
+Delivered:
 
-1. **Client SDK** (likely TypeScript for web, with native modules for
-   desktop):
-   - Keystroke dynamics capture (dwell/flight time) and mouse dynamics
-     capture (movement timing, micro-tremor where samplable), local-only
-     raw capture with only derived features leaving the device.
+1. **Client SDK** — `sdk-web/`, TypeScript, browser-first (as scoped;
+   native desktop modules were explicitly out of scope for this phase
+   and remain future work, see below):
+   - Keystroke dynamics capture (inter-keydown interval timing only)
+     and mouse dynamics capture (inter-`mousemove` interval timing
+     only) — deliberately record timing, never key values or cursor
+     positions, as a privacy property of the capture layer itself.
+   - WebAuthn registration and assertion flows
+     (`navigator.credentials.create/get`), requesting a device-bound
+     (non-resident/non-syncable-preferring) credential where the
+     authenticator supports it, feeding the server's Asymmetric
+     Learning Gate anchor-event logic.
+   - DPoP (RFC 9449) proof-of-possession generation with a
+     non-extractable WebCrypto ES256 keypair, including the RFC 7638
+     JWK thumbprint binding used by the server's `cnf.jkt` session
+     check.
+   - A documented public API (`GenomeClient`) covering
+     register/login/telemetry streaming/trust-update subscription in a
+     few lines of integration code.
    - Integration of the OS input-path anomaly signals documented in
      `attested_input_pipeline.md` (Raw Input on Windows, evdev/eBPF on
-     Linux, Input Monitoring awareness on macOS) as best-effort,
-     honestly-partial secondary signals.
-   - WebAuthn/FIDO2 registration and assertion flows, feeding
-     high-assurance anchor events into the Asymmetric Learning Gate.
-   - DPoP (RFC 9449) proof-of-possession generation bound to a
-     non-exportable private key.
+     Linux, Input Monitoring awareness on macOS) is **not** implemented
+     in this phase — it remains future work, see below.
 
-2. **Server risk engine** (likely Go or Rust for the hot path):
-   - Production implementation of the Asymmetric Learning Gate and the
-     synthetic-input detector, generalized from the single-feature /
-     single-signal Phase 1 prototypes to full feature vectors.
-   - DPoP token validation and binding enforcement.
-   - A CARTA-aligned policy engine that combines all risk signals
-     (behavioral trust score, input-authenticity score, device/session
-     binding validity) into session-level decisions: allow, step-up
-     (re-trigger WebAuthn), restrict (reduce session privileges), or
-     terminate.
-   - Post-quantum credential material: ML-DSA for signing, ML-KEM where
-     key establishment is needed, per NIST FIPS 203/204.
+2. **Server risk engine** — `server/`, Rust (`axum` + `tokio`):
+   - Production port of the Asymmetric Learning Gate
+     (`server/src/alg.rs`) and the synthetic-input detector
+     (`server/src/detector.rs`, `server/src/dsp.rs`,
+     `server/src/synthetic_input.rs`), carrying over the same
+     quarantine/anchor-validation thresholds and timing-moment /
+     micro-tremor spectral features validated in the Phase 1 Python
+     prototypes, with unit test coverage (23/23 tests passing).
+   - DPoP (RFC 9449) verification (`server/src/dpop.rs`): JWT proof
+     parsing, `htu`/`htm`/`iat` freshness and `jti` replay-window
+     checks, access-token binding via `ath` and `cnf.jkt`.
+   - FIDO2/WebAuthn registration + assertion verification via the
+     maintained `webauthn-rs` crate (no hand-rolled COSE/attestation
+     parsing).
+   - A telemetry ingestion endpoint (`/api/telemetry`) that runs
+     keystroke/mouse timing batches through the detector + trust-score
+     pipeline and returns a CARTA-style decision (`allow` / `stepup` /
+     `deny`) per the tiers defined in `docs/THREAT_MODEL.md`.
+   - An in-memory + SQLite-backed store sufficient for the demo; a real
+     deployment needs a proper datastore with durability, backup, and
+     multi-instance session-sharing guarantees this does not provide.
+   - Post-quantum credential material (ML-DSA/ML-KEM) was **not**
+     implemented in this phase — remains future work, see below.
 
-3. **Demo application**:
-   - A small real web app (not a toy) that exercises the full stack:
-     WebAuthn registration/login, live keystroke/mouse telemetry capture,
-     a trust-score dashboard showing the session's current risk score
-     and why (which signals contributed), and a way to simulate/demo
-     both defended attacks live (baseline poisoning attempt, synthetic
-     input injection attempt) so the defenses are visibly demonstrable,
-     not just claimed.
+3. **Demo application** — `demo-app/`, a Vite + vanilla TypeScript web
+   app wiring the SDK to the server end-to-end: passkey registration,
+   passkey login, a live trust-score dial driven by real keystroke/
+   mouse telemetry, and a button that injects synthetic-looking
+   keystroke timing to visibly demonstrate the detector and decision
+   reacting. See `demo-app/README.md` for exact run instructions and
+   this phase's honest statement that the synthetic-input defense
+   demonstrated here is the statistical detector only, not an
+   OS-level attested input pipeline.
 
-4. **Validation against real data** (addressing Phase 1's honestly
-   stated limitation that the synthetic-input detector was evaluated
-   synthetic-vs-synthetic): collect a real, consented keystroke/mouse
-   telemetry corpus from genuine users, and real injection-tool-produced
-   telemetry (from known humanizer libraries), and re-validate detector
-   accuracy against that real data before relying on it operationally.
+Explicitly NOT in Phase 2 scope (carried forward as future work):
 
-5. **Multivariate baseline generalization**: extend the Asymmetric
-   Learning Gate from the single-scalar-feature prototype in Phase 1 to
-   a full behavioral feature vector with proper multivariate drift
-   detection (e.g. Mahalanobis distance / subspace methods), and add
-   lifetime-drift bounding to harden against a patient adaptive attacker
-   who paces drift just under the per-batch detection thresholds.
+- **Validation against real data** (Phase 1's synthetic-vs-synthetic
+  evaluation limitation is unchanged): collecting a real, consented
+  keystroke/mouse telemetry corpus from genuine users and real
+  injection-tool-produced telemetry, and re-validating detector
+  accuracy against it before relying on it operationally.
+- **Multivariate baseline generalization**: the Asymmetric Learning
+  Gate still operates on the single-scalar-feature design validated in
+  Phase 1, not a full behavioral feature vector with multivariate
+  drift detection (e.g. Mahalanobis distance / subspace methods).
+- **Post-quantum credential material**: ML-DSA/ML-KEM per NIST FIPS
+  203/204 were not integrated; the server currently relies on
+  `webauthn-rs`'s classical (ECDSA/RSA) COSE algorithms and DPoP's
+  classical ES256.
+- **Native desktop/OS-level input-path signal integration**: the
+  `attested_input_pipeline.md` recommendations (Raw Input on Windows,
+  evdev/eBPF on Linux, Input Monitoring awareness on macOS) remain a
+  design document only; no native module consumes them yet.
+- **Production datastore, horizontal scaling, and credential/key
+  rotation operations** for the server.
 
-Phase 2 has not started; this plan will be updated as it begins.
+This plan will be updated again if/when a Phase 3 addressing the above
+begins.
